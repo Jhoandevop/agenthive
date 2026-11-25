@@ -1,0 +1,74 @@
+{
+  "titulo": "AgentHive",
+  "idioma": "es",
+  "puerto": 8890,
+  "agentes": [
+    {
+      "nombre": "backend",
+      "carpeta": "~/proyectos/mi-app",
+      "color": "#7aa2f7",
+      "modelo": "opus",
+      "descripcion": "Backend: APIs, base de datos, despliegue.",
+      "zona": 0,
+      "contexto": "Responde con cambios pequeños y explica cómo probarlos."
+    },
+    {
+      "nombre": "frontend",
+      "carpeta": "~/proyectos/mi-app",
+      "color": "#f7768e",
+      "modelo": "opus",
+      "descripcion": "Frontend: páginas, estilos, accesibilidad.",
+      "zona": 0
+    },
+    {
+      "nombre": "docs",
+      "carpeta": "~/proyectos/mi-docs",
+      "color": "#9ece6a",
+      "modelo": "sonnet",
+      "descripcion": "Documentación y guías.",
+      "zona": 1
+    },
+    {
+      "nombre": "prueba",
+      "carpeta": "{tmp}/agenthive-prueba",
+      "color": "#4fd1c5",
+      "modelo": "haiku",
+      "descripcion": "Agente de prueba en una carpeta temporal.",
+      "zona": 2
+    }
+  ],
+  "oficina": {
+    "zonas": [
+      {
+        "nombre": "PRODUCTO",
+        "color": "#4b5e9c",
+        "contexto": "Aplicación web principal: TypeScript, pruebas con node --test. Antes de cambiar la API, revisa docs/api.md."
+      },
+      {
+        "nombre": "DOCS",
+        "color": "#3f7d62",
+        "contexto": "Documentación para usuarios: frases cortas, ejemplos que se puedan copiar."
+      },
+      {
+        "nombre": "PRUEBAS",
+        "color": "#7d4c86"
+      }
+    ],
+    "carteles": [
+      {
+        "texto": "IDEAS"
+      },
+      {
+        "texto": "EQUIPO"
+      },
+      {
+        "texto": "OFICINA"
+      }
+    ],
+    "tv": "NOTICIAS"
+  },
+  "codex": {
+    "cupo": false,
+    "bucles": []
+  }
+}

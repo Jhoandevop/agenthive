@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd agent: starts AgentHive at login on macOS.
+     Install: replace /Users/YOU/agenthive and the node path (run `which node`), then
+       cp contrib/macos/com.example.agenthive.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.example.agenthive.plist
+     Open http://127.0.0.1:8890 afterwards (or add it to Login Items in your browser). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.agenthive</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>src/servidor.ts</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/YOU/agenthive</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/agenthive.log</string>
+  <key>StandardErrorPath</key><string>/tmp/agenthive.log</string>
+</dict>
+</plist>

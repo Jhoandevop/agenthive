@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="__LANG__"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="token" content="__TOKEN__">
+<meta name="config" content="__CONFIG__">
+<title>__TITULO__</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/estilo.css">
+<script type="module" src="/app.js"></script>
+</head><body>
+<main>
+<header>
+ <h1>__TITULO__</h1>
+ <div class="hdr">
+  <button type="button" id="b-bandeja" class="b-sec" aria-expanded="false"><span data-t="bandeja"></span> <span id="bn">0</span></button>
+  <button type="button" id="b-buscar" class="b-sec" data-tt="buscar_tt"><span data-t="buscar"></span> <kbd>Ctrl K</kbd></button>
+  <div id="hora"><span id="reloj"></span><span id="hora2" data-t="conectando"></span></div>
+ </div>
+</header>
+<div id="pared">
+ <div id="cupo"><canvas id="bat" width="20" height="9"></canvas><div id="cx"></div><div id="cs"></div><div id="cc" data-t="claude_sin"></div></div>
+ <div id="pend" hidden><h3 id="pend-t"></h3><div id="pend-l"></div><details id="pend-h"><summary data-t="respondidas"></summary><ul></ul></details></div>
+ <div id="pizarra"><div class="nota"></div><h3 data-t="pizarra"></h3><div id="feed"></div></div>
+</div>
+<div id="of">
+ <div id="vp"><div id="cam"><canvas id="cv"></canvas><div id="ov"></div></div>
+  <button id="zoomb" type="button" data-t="vista" data-tt="vista_tt"></button>
+ </div>
+</div>
+<div id="ley" data-t="leyenda"></div>
+<details class="estante" id="term"><summary data-t="bucles_terminados"></summary><ul></ul></details>
+<details class="estante" id="hist"><summary data-t="historial_cerradas"></summary><ul></ul></details>
+</main>
+<div id="tip"></div>
+
+<aside id="chat" aria-label="Chat" class="cerrado">
+ <div class="cab">
+  <span class="punto" id="c-punto"></span>
+  <div class="cab-t"><h2 id="c-nombre"></h2><div id="c-sub"></div></div>
+  <span class="chip-e" id="c-estado"></span>
+  <button type="button" id="c-x" class="b-sec" data-t="cerrar" data-tt="cerrar_tt"></button>
+ </div>
+ <div id="c-equipo" hidden><button type="button" id="b-editar" class="b-sec" data-t="editar"></button><button type="button" id="b-quitar" class="b-sec" data-t="quitar_equipo"></button></div>
+ <details id="c-ctx" hidden><summary id="c-ctx-t"></summary><div id="c-ctx-c"></div></details>
+ <div id="c-llamar" hidden>
+  <p data-t="no_esta"></p>
+  <button type="button" id="b-llamar-g"></button>
+  <small data-t="llamar_nota"></small>
+ </div>
+ <div class="barra" id="c-barra">
+  <label><span data-t="modelo"></span> <select id="c-modelo"><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
+  <label><span data-t="esfuerzo"></span> <select id="c-esfuerzo"><option value="" data-t="esf_def"></option><option value="low" data-t="esf_low"></option><option value="medium" data-t="esf_medium"></option><option value="high" data-t="esf_high"></option><option value="xhigh" data-t="esf_xhigh"></option><option value="max" data-t="esf_max"></option></select></label>
+  <label class="chk"><input type="checkbox" id="c-plan"> <span data-t="modo_plan"></span></label>
+  <span class="sep"></span>
+  <button type="button" id="b-res" class="b-sec"></button>
+  <button type="button" id="b-nueva" class="b-sec" data-t="sesion_nueva"></button>
+  <button type="button" id="b-aplicar" class="b-sec" data-t="aplicar_modelo" data-tt="aplicar_tt"></button>
+  <button type="button" id="b-hist" class="b-sec" data-t="historial"></button>
+  <button type="button" id="b-detener" class="b-alerta" data-t="detener"></button>
+  <button type="button" id="b-cerrar" class="b-sec" data-t="despedir" data-tt="despedir_tt"></button>
+ </div>
+ <div id="c-hist" hidden></div>
+ <div id="c-res" hidden></div>
+ <dl id="c-info" hidden></dl>
+ <div id="c-msgs" aria-live="polite"></div>
+ <div id="c-perms"></div>
+ <div id="c-term" hidden>
+  <p id="t-aviso"></p>
+  <textarea id="t-texto" rows="3" maxlength="1000" data-tp="msg_buzon"></textarea>
+  <button type="button" id="t-enviar" data-t="dejar_buzon"></button>
+ </div>
+ <form id="c-form">
+  <div id="c-plant"></div>
+  <div id="c-prev"></div>
+  <textarea id="c-texto" rows="3"></textarea>
+  <div class="fila">
+   <label class="b-sec adj"><span data-t="adjuntar"></span><input type="file" id="c-file" multiple hidden></label>
+   <span id="c-coste"></span>
+   <button type="submit" id="b-enviar" data-t="enviar"></button>
+  </div>
+ </form>
+</aside>
+
+<dialog id="vista" aria-label="Vista previa">
+ <div class="v-cab"><strong id="v-nombre"></strong><span class="sep"></span><a id="v-abrir" target="_blank" rel="noopener noreferrer" data-t="vista_abrir"></a><a id="v-bajar" data-t="vista_bajar"></a><button type="button" id="v-x" class="b-sec" data-t="cerrar"></button></div>
+ <div id="v-cuerpo"></div>
+</dialog>
+<dialog id="agente-dlg"><form id="agente-form">
+ <h3 id="af-titulo"></h3>
+ <label><span data-t="f_nombre"></span><input id="af-nombre" required pattern="[a-z0-9][a-z0-9\-]{1,30}" maxlength="31" autocomplete="off"><small data-t="f_nombre_ayuda"></small></label>
+ <label><span data-t="f_carpeta"></span><input id="af-carpeta" required maxlength="500" autocomplete="off"><small data-t="f_carpeta_ayuda"></small></label>
+ <label><span data-t="f_desc"></span><textarea id="af-desc" maxlength="200" rows="2"></textarea></label>
+ <label><span data-t="f_contexto"></span><textarea id="af-ctx" maxlength="2000" rows="3"></textarea><small data-t="f_contexto_ayuda"></small></label>
+ <div class="fila">
+  <label><span data-t="f_modelo"></span><select id="af-modelo"><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
+  <label><span data-t="f_color"></span><input type="color" id="af-color" value="#7aa2f7"></label>
+  <label><span data-t="f_zona"></span><select id="af-zona"></select></label>
+  <label><span data-t="f_puesto"></span><input type="number" id="af-puesto" min="0" max="63" required></label>
+ </div>
+ <p id="af-error" role="alert"></p>
+ <div class="fila fin"><button type="button" id="af-cancelar" class="b-sec" data-t="f_cancelar"></button><button type="submit" data-t="f_guardar"></button></div>
+</form></dialog>
+<dialog id="zona-dlg"><form id="zona-form">
+ <h3 id="zf-titulo"></h3>
+ <label><span data-t="z_nombre"></span><input id="zf-nombre" required maxlength="20" autocomplete="off"></label>
+ <fieldset><legend data-t="z_color"></legend><div id="zf-colores"></div></fieldset>
+ <label><span data-t="z_patron"></span><input id="zf-patron" maxlength="100" autocomplete="off"><small data-t="z_patron_ayuda"></small></label>
+ <label><span data-t="z_contexto"></span><textarea id="zf-ctx" maxlength="2000" rows="4"></textarea><small data-t="z_contexto_ayuda"></small></label>
+ <p id="zf-error" role="alert"></p>
+ <div class="fila fin"><button type="button" id="zf-quitar" class="b-alerta" data-t="quitar_zona"></button><span class="sep"></span><button type="button" id="zf-cancelar" class="b-sec" data-t="f_cancelar"></button><button type="submit" data-t="f_guardar"></button></div>
+</form></dialog>
+<div id="bandeja" hidden role="dialog"><h3 data-t="bandeja"></h3><div id="band-l"></div></div>
+<dialog id="buscador"><input id="bus-q" autocomplete="off" data-tp="bus_ph"><ul id="bus-l"></ul></dialog>
+<div id="toast" role="status"></div>
+</body></html>

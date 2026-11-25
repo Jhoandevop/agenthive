@@ -1,0 +1,10 @@
+# XDG autostart entry: waits for the server and opens the office in your browser.
+# Install: cp contrib/linux/agenthive.desktop ~/.config/autostart/
+# Change the port if you set "puerto" in oficina.config.json.
+[Desktop Entry]
+Type=Application
+Name=AgentHive
+Comment=Open AgentHive when the local server is ready
+Exec=sh -c 'for i in $(seq 1 60); do curl -fsS -o /dev/null http://127.0.0.1:8890/ && exec xdg-open http://127.0.0.1:8890/; sleep 1; done'
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

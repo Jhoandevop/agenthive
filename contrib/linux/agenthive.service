@@ -1,0 +1,20 @@
+# systemd user unit: starts AgentHive at login.
+# Install:  cp contrib/linux/agenthive.service ~/.config/systemd/user/
+#           (edit WorkingDirectory if you cloned elsewhere)
+#           systemctl --user daemon-reload && systemctl --user enable --now agenthive
+# Logs:     journalctl --user -u agenthive -f
+[Unit]
+Description=AgentHive (local office for coding agents)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/agenthive
+ExecStart=/usr/bin/env node src/servidor.ts
+Restart=on-failure
+RestartSec=5
+# The agents use your Claude Code login and your PATH (git, npm, …).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
