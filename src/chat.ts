@@ -1,7 +1,8 @@
 // Una sesión del Agent SDK por agente: entrada en streaming, eventos al navegador y permisos.
 import { randomUUID } from 'node:crypto';
-import type { Query, SDKMessage, SDKUserMessage, Options, PermissionResult, EffortLevel } from '@anthropic-ai/claude-agent-sdk';
-import type { Agente } from './config.ts';
+import type { Query, SDKMessage, SDKUserMessage, Options, PermissionResult, EffortLevel, PermissionUpdate, PermissionRuleValue } from '@anthropic-ai/claude-agent-sdk';
+import type { Agente, Modo } from './config.ts';
+import { reglaValida } from './config.ts';
 import type { Clase } from './seguridad.ts';
 // @ts-ignore: módulo JS compartido con el navegador
 import { t as tr } from '../public/i18n.js';
@@ -49,42 +50,71 @@ function preguntasDe(e: Record<string, unknown>) {
   }));
 }
 
+// Se muestran las reglas exactas antes de pedir confirmación. Solo se aceptan sugerencias
+// addRules/allow del SDK. Sin sugerencia, Bash admite únicamente un comando simple y corto:
+// nunca se trunca ni se convierte un comando compuesto en permiso para toda la herramienta.
+export const reglaTexto = (r: PermissionRuleValue) => (r.ruleContent ? `${r.toolName}(${r.ruleContent})` : r.toolName);
+function reglasPara(h: string, e: Record<string, unknown>, sug?: PermissionUpdate[]): PermissionRuleValue[] {
+  if (h === 'AskUserQuestion' || h === 'ExitPlanMode') return [];
+  const sugeridas = (sug ?? []).flatMap(u => (u.type === 'addRules' && u.behavior === 'allow' ? u.rules : []));
+  const validas = sugeridas.filter(r => r && typeof r.toolName === 'string'
+    && /^[A-Za-z_][\w-]*$/.test(r.toolName)
+    && (r.ruleContent === undefined || typeof r.ruleContent === 'string') && reglaValida(reglaTexto(r)));
+  if (validas.length) return validas.map(r => ({ toolName: r.toolName, ...(r.ruleContent !== undefined ? { ruleContent: r.ruleContent } : {}) }));
+  if (sugeridas.length) return []; // una sugerencia inválida no provoca una regla inferida
+  if (h === 'Bash' && typeof e.command === 'string' && e.command.length > 0 && e.command.length <= 200
+      && /^[A-Za-z0-9_./ -]+$/.test(e.command)) return [{ toolName: 'Bash', ruleContent: e.command }];
+  // Los paths de Write/Edit siguen la sintaxis de patrones del SDK. No inferimos patrones de un path literal.
+  return [];
+}
+
 // Tarjetas de permiso: cada pedido de canUseTool espera el clic del usuario. Sin respuesta a tiempo = rechazo.
 export class Permisos {
-  private pend = new Map<string, { agente: string; tarjeta: Ev; fin: (r: PermissionResult, como: string) => void; entrada: Record<string, unknown> }>();
+  private pend = new Map<string, { agente: string; tarjeta: Ev; fin: (r: PermissionResult, como: string) => void; entrada: Record<string, unknown>; reglas: PermissionRuleValue[] }>();
   private emitir: Emitir;
   private esperaMs: number;
   private l: Idioma;
   constructor(emitir: Emitir, esperaMs: number, idioma: Idioma = 'es') { this.emitir = emitir; this.esperaMs = esperaMs; this.l = idioma; }
 
-  pedir(agente: string, herramienta: string, entrada: Record<string, unknown>, op: { signal: AbortSignal; title?: string; decisionReason?: string }): Promise<PermissionResult> {
+  pedir(agente: string, herramienta: string, entrada: Record<string, unknown>, op: { signal: AbortSignal; title?: string; decisionReason?: string; suggestions?: PermissionUpdate[] }): Promise<PermissionResult> {
+    if (op.signal.aborted) return Promise.resolve({ behavior: 'deny', message: tr(this.l, 'perm_cancelado') });
     return new Promise(res => {
-      const id = randomUUID();
+      const id = randomUUID(), reglas = reglasPara(herramienta, entrada, op.suggestions);
       const tarjeta: Ev = {
         k: 'permiso', id, herramienta, titulo: op.title ?? '', motivo: op.decisionReason ?? '',
         resumen: resumir(herramienta, entrada), entrada: recortar(JSON.stringify(entrada, null, 2), 4000), vence: Date.now() + this.esperaMs,
         ...(herramienta === 'AskUserQuestion' ? { preguntas: preguntasDe(entrada) } : {}),
+        reglas: reglas.map(reglaTexto), // lo que agregaría «Permitir siempre» (se muestra antes de confirmar)
       };
       const fin = (r: PermissionResult, como: string) => {
         if (!this.pend.delete(id)) return;
         clearTimeout(reloj);
+        op.signal.removeEventListener('abort', abortar);
         this.emitir(agente, { k: 'permiso-fin', id, como, herramienta, resumen: tarjeta.resumen });
         res(r);
       };
       const reloj = setTimeout(() => fin({ behavior: 'deny', message: tr(this.l, 'perm_vencido') }, 'vencido'), this.esperaMs);
-      op.signal.addEventListener('abort', () => fin({ behavior: 'deny', message: tr(this.l, 'perm_cancelado') }, 'cancelado'), { once: true });
-      this.pend.set(id, { agente, tarjeta, fin, entrada });
+      const abortar = () => fin({ behavior: 'deny', message: tr(this.l, 'perm_cancelado') }, 'cancelado');
+      op.signal.addEventListener('abort', abortar, { once: true });
+      this.pend.set(id, { agente, tarjeta, fin, entrada, reglas });
       this.emitir(agente, tarjeta);
     });
   }
 
   // respuestas: solo para AskUserQuestion ({pregunta: respuesta}); viajan como `answers` en updatedInput.
-  decidir(agente: string, id: string, permitir: boolean, mensaje: string, respuestas?: Record<string, string>) {
+  // siempre: 'sesion' (destino session, se va al cerrar) o 'proyecto' (localSettings: .claude/settings.local.json de su
+  // carpeta). Nunca userSettings ni projectSettings. Devuelve las reglas agregadas para que el servidor las anote.
+  decidir(agente: string, id: string, permitir: boolean, mensaje: string, respuestas?: Record<string, string>, siempre?: 'sesion' | 'proyecto'): false | { reglas: string[]; siempre?: 'sesion' | 'proyecto' } {
     const p = this.pend.get(id);
     if (!p || p.agente !== agente) return false;
-    if (respuestas && p.tarjeta.herramienta === 'AskUserQuestion') p.fin({ behavior: 'allow', updatedInput: { ...p.entrada, answers: respuestas } }, 'respondido');
-    else p.fin(permitir ? { behavior: 'allow', updatedInput: p.entrada } : { behavior: 'deny', message: mensaje || tr(this.l, 'perm_rechazado') }, permitir ? 'permitido' : 'rechazado');
-    return true;
+    if (permitir && respuestas && p.tarjeta.herramienta === 'AskUserQuestion') { p.fin({ behavior: 'allow', updatedInput: { ...p.entrada, answers: respuestas } }, 'respondido'); return { reglas: [] }; }
+    if (permitir && siempre && p.reglas.length) {
+      const destination = siempre === 'sesion' ? 'session' : 'localSettings';
+      p.fin({ behavior: 'allow', updatedInput: p.entrada, updatedPermissions: [{ type: 'addRules', rules: p.reglas, behavior: 'allow', destination }] }, siempre === 'sesion' ? 'permitido-sesion' : 'permitido-proyecto');
+      return { reglas: p.reglas.map(reglaTexto), siempre };
+    }
+    p.fin(permitir ? { behavior: 'allow', updatedInput: p.entrada } : { behavior: 'deny', message: mensaje || tr(this.l, 'perm_rechazado') }, permitir ? 'permitido' : 'rechazado');
+    return { reglas: [] };
   }
 
   todas() { return [...this.pend.values()].map(p => ({ ...p.tarjeta, agente: p.agente })); }
@@ -121,14 +151,15 @@ export function deMensaje(tipo: string, message: any, conTextoUsuario: boolean):
   return out;
 }
 
-export type Lanzamiento = { resume?: string; modelo: string; esfuerzo?: EffortLevel; plan: boolean; contexto?: string };
+export type Lanzamiento = { resume?: string; modelo: string; esfuerzo?: EffortLevel; modo: Modo; contexto?: string };
 
 export class Sesion {
   estado: 'esperando' | 'trabajando' | 'cerrada' = 'cerrada';
   sessionId?: string;
   modelo = '';
   esfuerzo?: EffortLevel;
-  plan = false;
+  modo: Modo = 'default';
+  reglasSesion: string[] = []; // agregadas con «Permitir siempre (esta sesión)»; se van al cerrar
   private cola?: Cola<SDKUserMessage>;
   private q?: ReturnType<FnQuery>;
   private abort?: AbortController;
@@ -140,7 +171,7 @@ export class Sesion {
   private vistos = new Set<string>();
 
   readonly agente: Agente;
-  private deps: { query: FnQuery; permisos: Permisos; emitir: Emitir; cambio: () => void };
+  private deps: { query: FnQuery; permisos: Permisos; emitir: Emitir; cambio: () => void; cupo?: (info: unknown) => void };
   readonly l: Idioma;
   readonly titulo?: string;
   constructor(agente: Agente, deps: Sesion['deps'], idioma: Idioma = 'es', titulo?: string) { this.agente = agente; this.deps = deps; this.l = idioma; this.titulo = titulo; }
@@ -151,7 +182,7 @@ export class Sesion {
 
   async lanzar(o: Lanzamiento) {
     await this.cerrar();
-    Object.assign(this, { modelo: o.modelo, esfuerzo: o.esfuerzo, plan: o.plan, sessionId: o.resume, costoPrevio: 0, anunciada: undefined, detenida: false });
+    Object.assign(this, { modelo: o.modelo, esfuerzo: o.esfuerzo, modo: o.modo, reglasSesion: [], sessionId: o.resume, costoPrevio: 0, anunciada: undefined, detenida: false });
     this.herr.clear();
     const cola = (this.cola = new Cola<SDKUserMessage>()), abort = (this.abort = new AbortController());
     const q = (this.q = this.deps.query({
@@ -161,8 +192,8 @@ export class Sesion {
         resume: o.resume,
         model: o.modelo,
         effort: o.esfuerzo,
-        // Nunca bypassPermissions ni acceptEdits: lo que no esté permitido por las reglas del usuario pasa por canUseTool.
-        permissionMode: o.plan ? 'plan' : 'default',
+        // Modo elegido entre los admitidos por la web; nunca bypassPermissions.
+        permissionMode: o.modo,
         canUseTool: (h, e, op) => this.deps.permisos.pedir(this.agente.nombre, h, e, op),
         includePartialMessages: true,
         abortController: abort,
@@ -196,6 +227,8 @@ export class Sesion {
       this.emit({ k: 'sistema', s: this.tx('sis_init', { id: m.session_id.slice(0, 8), m: m.model, p: m.permissionMode }) });
       if (m.apiKeySource && m.apiKeySource !== 'none') this.emit({ k: 'sistema', s: this.tx('sis_apikey', { k: m.apiKeySource }), error: true });
       this.deps.cambio();
+    } else if (m.type === 'rate_limit_event') {
+      this.deps.cupo?.(m.rate_limit_info); // uso del plan (5 h / semana) para la batería de Claude
     } else if (m.type === 'stream_event') {
       const ev: any = m.event;
       if (!m.parent_tool_use_id && ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') this.emit({ k: 'delta', s: ev.delta.text });
@@ -247,11 +280,10 @@ export class Sesion {
     this.emit({ k: 'sistema', s: this.tx('sis_detenido') });
   }
 
-  async modoPlan(plan: boolean) {
-    if (!this.q) return;
-    await this.q.setPermissionMode(plan ? 'plan' : 'default');
-    this.plan = plan;
-    this.emit({ k: 'sistema', s: this.tx(plan ? 'sis_plan' : 'sis_normal') });
+  // Cambia el modo de permisos de la sesión en curso (si no está abierta, vale desde el próximo lanzamiento).
+  async cambiarModo(modo: Modo) {
+    this.modo = modo;
+    if (this.q) { await this.q.setPermissionMode(modo); this.emit({ k: 'sistema', s: this.tx('sis_modo', { m: this.tx('modo_' + modo) }) }); }
     this.deps.cambio();
   }
 

@@ -54,6 +54,6 @@ export function validarCarpeta(entrada: unknown, home: string): { ruta: string }
 export function guardarAtomico(ruta: string, datos: unknown) {
   const tmp = `${ruta}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(datos, null, 2) + '\n', { mode: 0o600 });
-  if (existsSync(ruta)) copyFileSync(ruta, ruta + '.bak');
+  if (existsSync(ruta)) { copyFileSync(ruta, tmp + '.bak'); renameSync(tmp + '.bak', ruta + '.bak'); }
   renameSync(tmp, ruta);
 }

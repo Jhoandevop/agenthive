@@ -3,6 +3,7 @@
 import { render } from './md.js';
 import { t as tr } from './i18n.js';
 import { iconoAbeja } from './abeja.js';
+import { iconoHormiga } from './hormiga.js';
 import { aplicar, setPendientes, seleccionar, ganchos, listaAgentes, iniciar, actualizarZonas } from './oficina.js';
 
 const TOKEN = document.querySelector('meta[name=token]').content;
@@ -35,7 +36,9 @@ const agente = n => roster.find(a => a.nombre === n);
 const nombreDe = a => a?.mostrar || a?.nombre || '';
 const viva = a => a && (a.estado === 'esperando' || a.estado === 'trabajando');
 const ESTADO = e => t('estado_' + e);
-const pintarIcono = (e, col, corona = null) => { e.textContent = ''; e.append(iconoAbeja(col, corona)); };
+const pintarIcono = (e, col, corona = null, codex = false) => { e.textContent = ''; e.append(codex ? iconoHormiga(col) : iconoAbeja(col, corona)); };
+const MODOS = CFG.modos || ['default', 'acceptEdits', 'plan', 'auto'];
+for (const m of MODOS) $('c-modo').append(Object.assign(el('option', '', t('modo_' + m)), { value: m }));
 
 // ---------- Oficina ----------
 iniciar(CFG, L);
@@ -47,7 +50,9 @@ ganchos({
     else abrirInfo(a);
   },
   llamar: n => llamar(n),
-  crear: p => abrirForm('crear', p),
+  crear: p => abrirMenuPuesto(p),
+  adoptar: (a, p) => abrirAdopcion(p, null, a.sesionId),
+  quitar: a => abrirQuitar(a.raw),
   crearZona: i => abrirZona('crear', i),
   editarZona: i => abrirZona('editar', i),
 });
@@ -61,7 +66,7 @@ function llamar(n) {
 
 // ---------- Panel lateral: agente, director (buzón) o ficha ----------
 function abrirPanel(m, id) {
-  modo = m; sel = id; adjuntos = []; $('c-prev').textContent = ''; $('c-coste').textContent = ''; $('c-hist').hidden = true; $('c-res').hidden = true; herrEls.clear(); vivoEl = null;
+  modo = m; sel = id; adjuntos = []; $('c-prev').textContent = ''; $('c-coste').textContent = ''; $('c-hist').hidden = true; $('c-res').hidden = true; $('c-reglas').hidden = true; herrEls.clear(); vivoEl = null;
   $('chat').classList.remove('cerrado'); document.body.classList.add('con-chat');
   seleccionar(m === 'agente' ? (id === '_director' ? 'general' : 'r-' + id) : m === 'general' ? 'general' : id);
 }
@@ -83,7 +88,7 @@ function abrirInfo(a) {
   infoA = a; abrirPanel('info', a.id); pintarCab();
   const dl = $('c-info'); dl.textContent = '';
   const filas = a.tipo === 'temp' ? [[t('tipo'), t('temporal_sub')], [t('tarea'), a.tarea], [t('modelo'), a.modelo], [t('contratado_por'), a.padreN]]
-    : [[t('tipo'), a.tipo === 'codex' ? t('bucle_codex') : t('sesion_claude')], [t('carpeta'), a.carpeta], [t('estado'), a.busy ? (a.vuelta || ESTADO('trabajando')) : ESTADO('esperando')], [t('ultimo_pedido'), a.pedido]];
+    : [[t('tipo'), a.tipo === 'codex' ? t(a.bucle ? 'bucle_codex' : 'sesion_codex') : t('sesion_claude')], [t('carpeta'), a.carpeta], [t('estado'), a.busy ? (a.vuelta || ESTADO('trabajando')) : ESTADO('esperando')], [t('ultimo_pedido'), a.pedido]];
   for (const [k, v] of filas) dl.append(el('dt', '', k), el('dd', '', v || '—'));
   $('c-msgs').textContent = '';
 }
@@ -96,6 +101,7 @@ function pintarCab() {
   if (a?.director && a.estado !== 'esperando' && a.estado !== 'trabajando' && a.estado !== 'libre') return abrirDirector();
   $('c-barra').hidden = !a || a.estado === 'libre' || a.estado === 'terminal';
   $('c-equipo').hidden = !a || !!a.director;
+  $('c-modo-ayuda').hidden = !a;
   pintarContexto(a);
   $('c-info').hidden = !inf;
   $('c-plant').hidden = !a;
@@ -109,22 +115,26 @@ function pintarCab() {
     $('c-sub').textContent = t('dir_sub', { n: DIRN });
     $('c-estado').textContent = d?.estado === 'terminal' ? ESTADO('terminal') : t('sin_sesion');
   } else if (inf) {
-    $('c-nombre').textContent = infoA.nombre; pintarIcono($('c-punto'), infoA.color);
+    $('c-nombre').textContent = infoA.nombre; pintarIcono($('c-punto'), infoA.color, null, infoA.tipo === 'codex');
     $('c-sub').textContent = infoA.carpeta || ''; $('c-estado').textContent = infoA.tipo === 'temp' ? ESTADO('temporal') : ESTADO(infoA.busy ? 'trabajando' : 'esperando');
     $('t-aviso').textContent = t('info_aviso');
   } else if (a) {
-    $('c-nombre').textContent = nombreDe(a); pintarIcono($('c-punto'), a.color, a.director ? DIRC : null);
+    $('c-nombre').textContent = nombreDe(a); pintarIcono($('c-punto'), a.color, a.director ? DIRC : null, a.motor === 'codex');
     $('c-sub').textContent = `${a.carpeta}${a.sesionId ? ' · ' + a.sesionId.slice(0, 8) : ''}`; $('c-sub').title = a.descripcion || '';
     $('c-estado').textContent = a.director && viva(a) ? t('en_web') + ' · ' + ESTADO(a.estado) : ESTADO(a.estado);
     $('t-aviso').textContent = t('term_aviso');
-    if (document.activeElement !== $('c-modelo')) $('c-modelo').value = a.modelo || a.modeloDefecto;
+    if (document.activeElement !== $('c-modelo')) { const m = a.modelo || a.modeloDefecto; if (![...$('c-modelo').options].some(x => x.value === m)) $('c-modelo').append(Object.assign(el('option', '', m), { value: m })); $('c-modelo').value = m; }
     if (viva(a) && document.activeElement !== $('c-esfuerzo')) $('c-esfuerzo').value = a.esfuerzo || '';
-    if (viva(a)) $('c-plan').checked = !!a.plan;
+    if (document.activeElement !== $('c-modo')) $('c-modo').value = a.modo || 'default';
+    $('c-modo').disabled = false;
+    for (const op of $('c-modo').options) op.disabled = a.motor === 'codex' && !['default', 'plan'].includes(op.value);
+    $('c-modo-ayuda').textContent = a.motor === 'codex' ? t('codex_limitacion') : t('modo_' + (a.modo || 'default') + '_ayuda');
+    if (!$('c-reglas').hidden) pintarReglas(a);
     $('b-aplicar').disabled = !viva(a); $('b-detener').disabled = a.estado !== 'trabajando'; $('b-cerrar').disabled = !viva(a);
     $('b-res').textContent = t('resultados', { n: archivos(sel).length });
   }
 }
-function opciones() { return { modelo: $('c-modelo').value, esfuerzo: $('c-esfuerzo').value || undefined, plan: $('c-plan').checked }; }
+function opciones() { return { modelo: $('c-modelo').value, esfuerzo: $('c-esfuerzo').value || undefined, modo: $('c-modo').value }; }
 $('b-llamar-g').onclick = () => llamar(modo === 'general' ? '_director' : sel);
 $('b-nueva').onclick = () => mandar({ t: 'lanzar', agente: sel, sesion: 'nueva', ...opciones() });
 $('b-aplicar').onclick = () => mandar({ t: 'lanzar', agente: sel, sesion: agente(sel)?.sesionId, mantener: true, ...opciones() });
@@ -132,7 +142,15 @@ $('b-detener').onclick = () => mandar({ t: 'detener', agente: sel });
 $('b-cerrar').onclick = () => mandar({ t: 'cerrar', agente: sel });
 $('b-hist').onclick = () => { const h = $('c-hist'); h.hidden = !h.hidden; if (!h.hidden) { h.textContent = t('cargando'); mandar({ t: 'historial', agente: sel }); } };
 $('b-res').onclick = () => { const r = $('c-res'); r.hidden = !r.hidden; if (!r.hidden) pintarResultados(); };
-$('c-plan').onchange = () => { if (viva(agente(sel))) mandar({ t: 'plan', agente: sel, plan: $('c-plan').checked }); };
+$('c-modo').onchange = () => mandar({ t: 'modo', agente: sel, modo: $('c-modo').value });
+$('b-reglas').onclick = () => { $('c-reglas').hidden = !$('c-reglas').hidden; if (!$('c-reglas').hidden) pintarReglas(agente(sel)); };
+function pintarReglas(a) {
+  const box = $('c-reglas'); box.textContent = '';
+  for (const [destino, reglas] of [['sesion', a?.reglasSesion || []], ['proyecto', a?.reglasWeb || []]]) for (const regla of reglas) {
+    const row = el('div', 'fila'); row.append(el('code', '', regla + ' · ' + t('destino_' + destino)), boton(t('quitar'), 'b-sec', () => { if (confirm(t('quitar_regla_conf', { r: regla }))) mandar({ t: 'quitarRegla', agente: a.nombre, destino, regla }); })); box.append(row);
+  }
+  if (!box.children.length) box.textContent = t('reglas_vacio');
+}
 $('t-enviar').onclick = () => {
   const x = $('t-texto').value.trim(), to = modo === 'info' ? infoA?.raw : sel;
   if (!x || !to) return;
@@ -151,7 +169,7 @@ function pintarHist(lista) {
 }
 
 // ---------- Equipo: crear (desde un escritorio vacío), editar y quitar ----------
-let formModo = null, abrirAlLlegar = null;
+let formModo = null, abrirAlLlegar = null, sesionElegida = null;
 function opcionesZona() { $('af-zona').textContent = ''; for (const [i, z] of CFG.oficina.zonas.entries()) $('af-zona').append(Object.assign(el('option', '', z.nombre), { value: String(i) })); }
 opcionesZona();
 // Contexto que recibe el agente al llamarlo: el de su zona y el suyo (plegable en su panel).
@@ -195,36 +213,88 @@ $('zf-quitar').onclick = async () => {
 };
 function abrirForm(m, d) {
   formModo = m; const a = m === 'editar' ? agente(d.nombre) : null;
-  $('af-titulo').textContent = m === 'crear' ? t('f_crear') : t('f_editar', { n: a.nombre });
+  $('af-titulo').textContent = m === 'adoptar' ? t('f_adoptar') : m === 'crear' ? t('f_crear') : t('f_editar', { n: a.nombre });
   $('af-nombre').value = a?.nombre ?? ''; $('af-nombre').disabled = !!a;
-  $('af-carpeta').value = a?.carpeta ?? ''; $('af-carpeta').disabled = !!a; $('af-carpeta').placeholder = '~/…';
+  $('af-carpeta').value = a?.carpeta ?? (m === 'adoptar' ? sesionElegida.cwd : ''); $('af-carpeta').disabled = !!a || m === 'adoptar'; $('af-carpeta').placeholder = '~/…';
   $('af-desc').value = a?.descripcion ?? ''; $('af-ctx').value = a?.contexto ?? ''; $('af-modelo').value = a?.modeloDefecto ?? 'sonnet'; $('af-color').value = a?.color ?? '#7aa2f7';
+  $('af-motor').value = a?.motor || (m === 'adoptar' ? sesionElegida.motor || 'claude' : 'claude'); $('af-motor').disabled = !!a || m === 'adoptar'; actualizarMotorForm();
+  $('af-modelo-codex').value = a?.motor === 'codex' ? a.modeloDefecto : m === 'adoptar' && sesionElegida.motor === 'codex' ? sesionElegida.modelo || '' : '';
   const pu = a?.puesto ?? d; $('af-zona').value = String(pu?.zona ?? 0); $('af-puesto').value = String(pu?.i ?? 0);
   $('af-error').textContent = ''; $('agente-dlg').showModal(); (a ? $('af-desc') : $('af-nombre')).focus();
 }
 $('af-cancelar').onclick = () => $('agente-dlg').close();
 async function equipo(cuerpo) {
   const r = await fetch('/agentes', { method: 'POST', headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo) });
-  return r.ok ? null : await r.text();
+  if (!r.ok) return await r.text();
+  const datos = await r.json(); if (datos.deshacer) avisoDeshacer(datos.deshacer, cuerpo.accion === 'quitar' ? t('agente_quitado', { n: cuerpo.nombre }) : t('sesion_soltada'));
+  return null;
 }
 $('agente-form').onsubmit = async e => {
   e.preventDefault();
   const nombre = $('af-nombre').value.trim(), puesto = { zona: Number($('af-zona').value), i: Number($('af-puesto').value) };
-  const comun = { nombre, modelo: $('af-modelo').value, descripcion: $('af-desc').value.trim(), contexto: $('af-ctx').value.trim(), color: $('af-color').value, puesto };
-  const err = await equipo(formModo === 'crear' ? { accion: 'crear', carpeta: $('af-carpeta').value.trim(), ...comun } : { accion: 'editar', ...comun }).catch(() => t('sin_conexion_corto'));
+  const motor = $('af-motor').value;
+  const comun = { nombre, motor, modelo: motor === 'codex' ? $('af-modelo-codex').value.trim() || 'default' : $('af-modelo').value, descripcion: $('af-desc').value.trim(), contexto: $('af-ctx').value.trim(), color: $('af-color').value, puesto };
+  const err = await equipo(formModo === 'adoptar' ? { accion: 'adoptar', sesion: sesionElegida.sesion, ...comun } : formModo === 'crear' ? { accion: 'crear', carpeta: $('af-carpeta').value.trim(), ...comun } : { accion: 'editar', ...comun }).catch(() => t('sin_conexion_corto'));
   if (err) { $('af-error').textContent = err; return; }
   $('agente-dlg').close();
   avisar(formModo === 'crear' ? t('agente_creado', { n: nombre }) : t('agente_editado'));
-  if (formModo === 'crear') abrirAlLlegar = nombre;
+  if (formModo === 'crear' || formModo === 'adoptar') abrirAlLlegar = nombre;
 };
 $('b-editar').onclick = () => abrirForm('editar', { nombre: sel });
-$('b-quitar').onclick = async () => {
-  const n = sel;
-  if (!n || !confirm(t('confirmar_quitar', { n }))) return;
-  const err = await equipo({ accion: 'quitar', nombre: n }).catch(() => t('sin_conexion_corto'));
+$('b-quitar').onclick = () => abrirQuitar(sel);
+$('b-quitar-puesto').onclick = () => abrirQuitar(sel);
+$('b-cambiar').onclick = () => abrirAdopcion(null, sel);
+$('af-motor').onchange = actualizarMotorForm;
+function actualizarMotorForm() {
+  const cx = $('af-motor').value === 'codex'; $('af-modelo').hidden = cx; $('af-modelo-codex').hidden = !cx;
+}
+let puestoAdoptar = null, agenteCambiar = null, filtroAdoptar = null, paginaAdoptar = 0, quitarNombre = null;
+function abrirMenuPuesto(p) { puestoAdoptar = p; $('puesto-dlg').showModal(); }
+$('pm-crear').onclick = () => { $('puesto-dlg').close(); abrirForm('crear', puestoAdoptar); };
+$('pm-adoptar').onclick = () => { $('puesto-dlg').close(); abrirAdopcion(puestoAdoptar); };
+$('pm-cerrar').onclick = () => $('puesto-dlg').close();
+function abrirAdopcion(p, n = null, filtro = null) {
+  puestoAdoptar = p; agenteCambiar = n; filtroAdoptar = filtro; paginaAdoptar = 0;
+  $('ad-lista').textContent = t('cargando'); $('adoptar-dlg').showModal(); pedirAdoptables();
+}
+function pedirAdoptables() { mandar({ t: 'adoptables', ...(agenteCambiar ? { agente: agenteCambiar } : {}), desde: paginaAdoptar }); }
+$('ad-cerrar').onclick = () => $('adoptar-dlg').close();
+$('ad-mas').onclick = () => { paginaAdoptar += 30; pedirAdoptables(); };
+function pintarAdoptables(d) {
+  if (!$('adoptar-dlg').open || (d.agente || null) !== agenteCambiar) return;
+  const box = $('ad-lista'); box.textContent = ''; let total = 0;
+  for (const [clave, lista] of [['adoptar_vivas', d.vivas], ['adoptar_pasadas', d.pasadas]]) {
+    const xs = (lista || []).filter(s => !filtroAdoptar || s.sesion === filtroAdoptar);
+    if (!xs.length) continue; box.append(el('h4', '', t(clave)));
+    for (const s of xs) { total++; const row = el('div', 'ses'); row.append(el('span', '', `${s.motor === 'codex' ? 'CODEX · ' : ''}${s.nombre || s.titulo || s.sesion} · ${s.cwd}`));
+      const b = boton(t('elegir'), 'b-sec', async () => {
+        if (agenteCambiar) { const err = await equipo({ accion: 'editar', nombre: agenteCambiar, sesion: s.sesion }).catch(() => t('sin_conexion_corto')); if (err) return avisar(err); $('adoptar-dlg').close(); avisar(t('agente_editado')); }
+        else { sesionElegida = s; $('adoptar-dlg').close(); abrirForm('adoptar', puestoAdoptar); }
+      }); b.disabled = !s.valida; if (!s.valida) b.title = t('no_valida'); row.append(b); box.append(row);
+    }
+  }
+  if (!total) box.textContent = t('adoptar_vacio');
+  $('ad-mas').hidden = !!filtroAdoptar || (d.pasadas || []).length < 30;
+}
+function abrirQuitar(n) {
+  const a = agente(n); if (!a || a.director) return;
+  quitarNombre = n; $('qd-texto').textContent = t('confirmar_quitar_fija', { n });
+  $('qd-soltar').disabled = !a.sesionFija; $('quitar-dlg').showModal();
+}
+$('qd-cancelar').onclick = () => $('quitar-dlg').close();
+async function quitarPuesto(soltar) {
+  const n = quitarNombre; if (!n) return;
+  const err = await equipo(soltar ? { accion: 'editar', nombre: n, sesion: null } : { accion: 'quitar', nombre: n }).catch(() => t('sin_conexion_corto'));
   if (err) return avisar(t('no_guardado', { e: err }));
-  cerrarPanel(); avisar(t('agente_quitado', { n }));
-};
+  $('quitar-dlg').close(); if (!soltar) cerrarPanel();
+}
+$('qd-equipo').onclick = () => quitarPuesto(false);
+$('qd-soltar').onclick = () => quitarPuesto(true);
+function avisoDeshacer(id, texto) {
+  const box = $('toast-deshacer'); $('td-texto').textContent = texto; box.hidden = false;
+  clearTimeout(avisoDeshacer.timer); avisoDeshacer.timer = setTimeout(() => { box.hidden = true; }, 10000);
+  $('td-boton').onclick = async () => { const err = await equipo({ accion: 'deshacer', id }).catch(() => t('sin_conexion_corto')); if (err) return avisar(err); box.hidden = true; };
+}
 
 // ---------- Resultados: archivos que el agente creó o editó ----------
 function archivos(n) {
@@ -357,7 +427,12 @@ function tarjetaPermiso(p, agenteN) {
     if (Object.keys(r).length < formas.length) return avisar(t('elige_resp'));
     enviar({ permitir: true, respuestas: r });
   }));
-  else fila.append(boton(t('permitir_vez'), '', () => enviar({ permitir: true })));
+  else {
+    fila.append(boton(t('permitir_vez'), '', () => enviar({ permitir: true })));
+    if (p.reglas?.length) for (const destino of ['sesion', 'proyecto']) fila.append(boton(t('siempre_' + destino), 'b-sec', () => {
+      if (confirm(t('siempre_conf', { r: p.reglas.join('\n'), d: t('destino_' + destino) }))) enviar({ permitir: true, siempre: destino });
+    }));
+  }
   const no = boton(t(ask ? 'no_responder' : 'rechazar'), 'b-alerta', () => enviar({ permitir: false, mensaje: msg.value.trim() }));
   msg.oninput = () => (no.textContent = msg.value.trim() ? t('rechazar_msg') : t(ask ? 'no_responder' : 'rechazar'));
   const tic = () => { const s = Math.max(0, Math.round((p.vence - Date.now()) / 1000)); cuenta.textContent = t('se_rechaza', { t: `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` }); };
@@ -571,6 +646,7 @@ function conectar() {
       if (ev.k === 'usuario' && n === sel) { ev.locales = ultimosLocales; ultimosLocales = []; }
       if (modo === 'agente' && n === sel) pintarEv(ev, true);
     }
+    else if (d.t === 'adoptables') pintarAdoptables(d);
     else if (d.t === 'historial' && d.agente === sel) pintarHist(d.sesiones);
     else if (d.t === 'aviso' || d.t === 'error') avisar(d.s);
   };

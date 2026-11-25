@@ -1,17 +1,21 @@
 // Oficina de agentes: servidor local (solo 127.0.0.1) que lanza agentes con el Agent SDK y habla con la web.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFileSync, mkdirSync, rmSync, writeFileSync, copyFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, mkdirSync, rmSync, writeFileSync, copyFileSync, existsSync, statSync, renameSync } from 'node:fs';
 import { join, dirname, basename, extname, isAbsolute, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { query as sdkQuery, listSessions, getSessionMessages, type EffortLevel } from '@anthropic-ai/claude-agent-sdk';
-import { cargarConfig, validar, patronARegex, patronSeguro, MAX_PUESTO, MAX_ZONAS, MAX_CONTEXTO, PALETA, type Config, type Agente } from './config.ts';
+import { cargarConfig, validar, patronARegex, patronSeguro, MAX_PUESTO, MAX_ZONAS, MAX_CONTEXTO, PALETA, MODOS, UUID_RE, type Config, type Agente, type Modo } from './config.ts';
 import { asignarPuestos, puestoLibre, validarCarpeta, guardarAtomico } from './equipo.ts';
-import { sesionesEnTerminal } from './agentes.ts';
+import { sesionesEnTerminal, descendienteDe } from './agentes.ts';
 import { agregarBuzon, preguntas, responderPregunta, hiloDirector } from './tablero.ts';
-import { Estado } from './estado.ts';
+import { SesionCodex, detectarCodex, listarRolloutsCodex, type SpawnCodex } from './codex.ts';
+import { cupoDeEvento as parsearCupoEvento, cupoDeUsage, cupoDeError } from './cupo.ts';
+import { unirSesiones, propietario } from './sesiones.ts';
+import { rutaReglas, reglasProyecto } from './reglas.ts';
+import { Estado, tapar } from './estado.ts';
 import { crudoDemo, sembrarDemo, estadoDemo, queryDemo, DIR_DEMO } from './demo.ts';
 import { Sesion, Permisos, deMensaje, recortar, type Ev, type FnQuery, type AdjuntoListo, type Idioma } from './chat.ts';
 import { MAX_IMAGEN, MAX_ADJUNTO, nuevoToken, hostValido, origenValido, tokenValido, clasificar, nombreSeguro, dentroDe, firmar, TEXTO } from './seguridad.ts';
@@ -30,6 +34,7 @@ const ESTATICOS: Record<string, [string, string]> = {
   '/i18n.js': ['public/i18n.js', 'text/javascript; charset=utf-8'],
   '/oficina.js': ['public/oficina.js', 'text/javascript; charset=utf-8'],
   '/plano.js': ['public/plano.js', 'text/javascript; charset=utf-8'],
+  '/hormiga.js': ['public/hormiga.js', 'text/javascript; charset=utf-8'],
   '/abeja.js': ['public/abeja.js', 'text/javascript; charset=utf-8'],
   '/favicon.svg': ['public/favicon.svg', 'image/svg+xml'],
   '/estilo.css': ['public/estilo.css', 'text/css; charset=utf-8'],
@@ -48,6 +53,11 @@ export type Opciones = {
   dirParaDirector?: string;
   generador?: () => unknown; // estado de la oficina; por defecto el generador propio (src/estado.ts)
   listar?: (dir: string) => Promise<{ sessionId: string; customTitle?: string; summary: string; firstPrompt?: string; lastModified: number; cwd?: string }[]>;
+  listarTodas?: () => Promise<{ sessionId: string; customTitle?: string; summary: string; firstPrompt?: string; lastModified: number; cwd?: string }[]>;
+  spawnCodex?: SpawnCodex;
+  detectarCodex?: () => ReturnType<typeof detectarCodex>;
+  listarCodex?: () => ReturnType<typeof listarRolloutsCodex>;
+  cupoClaude?: boolean; // consultar el uso del plan (5 h / semana); por defecto solo con el SDK real
 };
 
 export function crear(o: Opciones = {}) {
@@ -74,6 +84,7 @@ export function crear(o: Opciones = {}) {
     asignarPuestos(crudo, nuevo);
     config.agentes = nuevo.agentes;
     config.oficina = nuevo.oficina;
+    if (director && nuevo.director) Object.assign(director, nuevo.director);
     roster = config.agentes;
     porNombre = new Map([...roster, ...(agDir ? [agDir] : [])].map(a => [a.nombre, a]));
   }
@@ -90,8 +101,9 @@ export function crear(o: Opciones = {}) {
   const dirSesiones = o.dirSesiones ?? (o.demo ? join(tmpdir(), 'agenthive-demo', 'sesiones') : undefined);
   if (dirSesiones) mkdirSync(dirSesiones, { recursive: true });
   const listar = o.listar ?? (o.demo ? async () => [] : (dir: string) => listSessions({ dir, limit: 40 }));
+  const listarTodas = o.listarTodas ?? (o.demo ? async () => [] : () => listSessions({ limit: 80 }));
   const generador = o.generador ?? (o.demo ? estadoDemo() : (() => {
-    const e = new Estado({ home: homedir(), memoria: join(tmp, 'vistos.json'), esDirector: n => !!dirRe?.test(n), nombreDirector: director?.nombre, codex: config.codex, idioma: l });
+    const e = new Estado({ home, memoria: join(tmp, 'vistos.json'), esDirector: n => !!dirRe?.test(n), nombreDirector: director?.nombre, codex: config.codex, idioma: l });
     return () => e.generar();
   })());
 
@@ -110,6 +122,7 @@ export function crear(o: Opciones = {}) {
   const enviarA = (ws: WebSocket, x: unknown) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(x));
   const difundir = (x: unknown) => { const s = JSON.stringify(x); for (const ws of clientes) if (ws.readyState === ws.OPEN) ws.send(s); };
   const emitir = (agente: string, ev: Ev) => {
+    if (ev.error && porNombre.get(agente)?.motor !== 'codex') { const dato = cupoDeError(ev.s ?? ev.error); if (dato) anotarCupo(dato); }
     if (ev.k === 'archivo') { // solo archivos dentro de su carpeta; se agregan enlaces firmados
       const a = porNombre.get(agente), r = String(ev.ruta);
       const e = a && enlace(agente, isAbsolute(r) ? r : resolve(a.carpeta, r));
@@ -126,32 +139,48 @@ export function crear(o: Opciones = {}) {
     if (ev.k === 'permiso' || ev.k === 'permiso-fin') cambio();
   };
   const permisos = new Permisos(emitir, o.esperaPermisoMs ?? 10 * 60_000, l);
-  const sesiones = new Map<string, Sesion>();
+  const sesiones = new Map<string, Sesion | SesionCodex>();
   const sesion = (a: Agente) => {
     let s = sesiones.get(a.nombre);
     // El director lanzado desde la web se titula según su patrón ("lead-*" → "lead-web") para reconocerlo como director.
-    if (!s) sesiones.set(a.nombre, (s = new Sesion(a, { query: o.query ?? (o.demo ? queryDemo : (sdkQuery as unknown as FnQuery)), permisos, emitir, cambio }, l, a.nombre === DIR ? director!.patronSesion.replace(/\*/g, 'web').replace(/\?/g, 'x') : undefined)));
+    if (!s) {
+      s = a.motor === 'codex' ? new SesionCodex(a, { emitir, cambio, spawn: o.spawnCodex }, l) : new Sesion(a, { query: o.query ?? (o.demo ? queryDemo : (sdkQuery as unknown as FnQuery)), permisos, emitir, cambio, cupo: i => cupoDeEvento(i) }, l, a.nombre === DIR ? director!.patronSesion.replace(/\*/g, 'web').replace(/\?/g, 'x') : undefined);
+      sesiones.set(a.nombre, s);
+    }
     return s;
   };
 
-  let terminal = sesionesEnTerminal(dirSesiones);
-  const enTerminal = (a: Agente) => terminal.find(t => (a.nombre === DIR ? !!dirRe?.test(t.nombre) : t.nombre === a.nombre));
+  const leerCodex = o.detectarCodex ?? (o.demo || o.generador ? () => [] : () => detectarCodex({ home }));
+  const listarCX = o.listarCodex ?? (o.demo ? () => [] : () => listarRolloutsCodex(home));
+  let codexActual = leerCodex();
+  const leerTerminales = () => [
+    ...sesionesEnTerminal(dirSesiones).map(t => ({ ...t, motor: 'claude' as const })),
+    ...codexActual.filter(x => 'pid' in x && x.pid && ![...sesiones.values()].some(s => s instanceof SesionCodex && (s.pid === x.pid || (!!s.pid && descendienteDe(Number(x.pid), s.pid))))).map(x => ({ pid: 'pid' in x ? x.pid : 0, nombre: x.nombre, cwd: x.cwd, estado: x.estado, sessionId: x.sesionId, inicio: x.inicio, motor: 'codex' as const })),
+  ];
+  let terminal = leerTerminales();
+  // En terminal: por nombre, o por la sesión fijada (adoptada) del agente. El director: por su patrón.
+  const enTerminal = (a: Agente) => terminal.find(t => propietario({ ...t, sesionId: t.sessionId, tipo: t.motor }, roster, [], director?.patronSesion) === a.nombre);
+  const modoDe = (a: Agente): Modo => (a.nombre === DIR ? director?.modoPermisos : a.modoPermisos) ?? 'default';
   function estado() {
     const filas = roster.map(a => {
       const s = sesiones.get(a.nombre), t = enTerminal(a);
       return {
-        nombre: a.nombre, carpeta: a.carpeta, color: a.color, descripcion: a.descripcion, modeloDefecto: a.modelo, zona: a.zona, puesto: a.puesto, contexto: a.contexto,
-        estado: t ? 'terminal' : s?.viva ? s.estado : 'libre', terminalEstado: t?.estado,
-        sesionId: s?.sessionId, modelo: s?.modelo, esfuerzo: s?.esfuerzo, plan: !!s?.plan, permisos: permisos.pendientesDe(a.nombre).length,
+        nombre: a.nombre, motor: a.motor ?? 'claude', carpeta: a.carpeta, color: a.color, descripcion: a.descripcion, modeloDefecto: a.modelo, zona: a.zona, puesto: a.puesto, contexto: a.contexto,
+        estado: t ? 'terminal' : s?.viva ? s.estado : 'libre', terminalEstado: t?.estado, terminalNombre: t?.nombre,
+        sesionId: s?.sessionId, sesionFija: a.sesion, modelo: s?.modelo, esfuerzo: s?.esfuerzo, modo: s?.viva ? s.modo : modoDe(a),
+        reglasWeb: a.reglasWeb ?? [], reglasSesion: s?.viva ? s.reglasSesion : [], permisos: permisos.pendientesDe(a.nombre).length,
       };
     });
     if (director) {
-      // Solo un director: si el de la web está activo, se muestra «en la web» aunque se abra otro en una terminal.
-      const s = sesiones.get(DIR), t = agDir && enTerminal(agDir) || terminal.find(x => dirRe!.test(x.nombre));
+      // Un solo escritorio de director aunque haya varias sesiones: manda la de la terminal; si no, la de la web.
+      // «×N» y la lista de todas van en `directores` (la pastilla de la oficina las muestra).
+      const s = sesiones.get(DIR), ts = terminal.filter(x => dirRe!.test(x.nombre)), t = ts[0];
+      const directores = [...ts.map(x => ({ nombre: x.nombre, donde: 'terminal', estado: x.estado })), ...(s?.viva ? [{ nombre: director.nombre, donde: 'web', estado: s.estado }] : [])];
       filas.push({
         nombre: DIR, director: true, mostrar: director.nombre, lanzable: !!agDir, carpeta: director.carpeta ?? '', color: director.color, descripcion: '', modeloDefecto: director.modelo, zona: undefined,
-        estado: s?.viva ? s.estado : t ? 'terminal' : 'libre', terminalEstado: t?.estado,
-        sesionId: s?.sessionId, modelo: s?.modelo, esfuerzo: s?.esfuerzo, plan: !!s?.plan, permisos: permisos.pendientesDe(DIR).length,
+        estado: s?.viva ? s.estado : t ? 'terminal' : 'libre', terminalEstado: t?.estado, web: !!s?.viva, directores,
+        sesionId: s?.sessionId, modelo: s?.modelo, esfuerzo: s?.esfuerzo, modo: s?.viva ? s.modo : modoDe(agDir ?? ({ nombre: DIR } as Agente)),
+        reglasWeb: director.reglasWeb ?? [], reglasSesion: s?.viva ? s.reglasSesion : [], permisos: permisos.pendientesDe(DIR).length,
       } as any);
     }
     return filas;
@@ -161,12 +190,19 @@ export function crear(o: Opciones = {}) {
 
   // La oficina (generador), las preguntas y el hilo con el director: se empujan cuando cambian.
   let oficina: unknown = null, ultimaOficina = '';
-  const refrescarOficina = () => { try { oficina = generador(); } catch (e) { console.error('generador:', (e as Error).message); } };
+  // Cada sesión que es de un agente (lanzada desde aquí, o adoptada) se une a SU escritorio: nunca toma otro asiento.
+  // La del director va solo a Dirección. Una hija de este proceso sin dueño conocido todavía no se muestra.
+  function unirPropias(e: any) {
+    if (!e || !Array.isArray(e.agentes)) return e;
+    return unirSesiones(e, roster, [...sesiones].filter(([, x]) => x.viva).map(([nombre, x]) => ({ nombre, sessionId: x.sessionId, pid: x instanceof SesionCodex ? x.pid : undefined })), director?.patronSesion);
+  }
+  const refrescarOficina = () => { try { codexActual = leerCodex(); const e: any = generador(); oficina = unirPropias(e && typeof e === 'object' ? { ...e, agentes: [...(e.agentes ?? []), ...codexActual] } : e); } catch (e) { console.error('generador:', (e as Error).message); } };
   refrescarOficina();
   const hilo = () => !director ? [] : hiloDirector(dirCoord, director.nombre).map(m => ({
     ...m, imagenes: (m as any).imagenes?.map((r: string) => enlace('_', r)?.url).filter(Boolean),
   }));
-  const msgOficina = () => ({ t: 'oficina', estado: oficina, preguntas: director ? preguntas(dirCoord, director.nombre) : { pendientes: [], respondidas: [] }, hilo: hilo() });
+  const conCupo = (e: any) => (e && typeof e === 'object' && cupoClaude ? { ...e, cupo: { ...(e.cupo ?? {}), claude: cupoClaude } } : e);
+  const msgOficina = () => ({ t: 'oficina', estado: conCupo(oficina), preguntas: director ? preguntas(dirCoord, director.nombre) : { pendientes: [], respondidas: [] }, hilo: hilo() });
   function revisarOficina() {
     const s = JSON.stringify(msgOficina());
     if (s !== ultimaOficina) { ultimaOficina = s; for (const ws of clientes) if (ws.readyState === ws.OPEN) ws.send(s); }
@@ -177,13 +213,13 @@ export function crear(o: Opciones = {}) {
     if (vuelta % 3 === 0) refrescarOficina(); // ~4,5 s, como estado.sh
     revisarOficina();
     if (vuelta % 2) return;
-    const n = sesionesEnTerminal(dirSesiones);
+    const n = leerTerminales();
     if (JSON.stringify(n) !== JSON.stringify(terminal)) { terminal = n; cambio(); }
   }, 1500);
 
   async function sesionesDe(a: Agente) {
     const vivas = new Set(terminal.map(t => t.sessionId));
-    const lista = await listar(a.carpeta);
+    const lista = a.motor === 'codex' ? listarCX().filter(s => s.cwd === a.carpeta).map(s => ({ ...s, summary: s.pedido, firstPrompt: '', customTitle: a.sesion === s.sessionId ? a.nombre : undefined })) : await listar(a.carpeta);
     return lista.filter(s => !s.cwd || s.cwd === a.carpeta).map(s => ({
       id: s.sessionId, titulo: recortar(s.customTitle || s.summary || s.firstPrompt || '—', 120), fecha: s.lastModified,
       propia: a.nombre === DIR ? !!dirRe?.test(s.customTitle ?? '') : s.customTitle === a.nombre, enTerminal: vivas.has(s.sessionId),
@@ -192,14 +228,18 @@ export function crear(o: Opciones = {}) {
 
   // Solo agentes del roster (o el director configurado), solo en su carpeta, nunca una sesión viva en terminal.
   async function lanzar(a: Agente, d: Record<string, unknown>) {
+    if (d.modo !== undefined && !MODOS.includes(d.modo as Modo)) throw new Error(tx('err_modo'));
     if (enTerminal(a)) throw new Error(tx('err_terminal'));
     if (!existsSync(a.carpeta) || !statSync(a.carpeta).isDirectory()) throw new Error(tx('err_carpeta'));
-    const modelo = typeof d.modelo === 'string' && MODELOS.includes(d.modelo) ? d.modelo : a.modelo;
+    const modelo = typeof d.modelo === 'string' && (a.motor === 'codex' ? /^[a-zA-Z0-9._-]{1,80}$/.test(d.modelo) : MODELOS.includes(d.modelo)) ? d.modelo : a.modelo;
     const esfuerzo = ESFUERZOS.includes(d.esfuerzo as EffortLevel) ? (d.esfuerzo as EffortLevel) : undefined;
     const lista = (await sesionesDe(a)).sort((x, y) => y.fecha - x.fecha);
     let resume: string | undefined;
     // El director retoma su última sesión con nombre de director; si no hay, la última de la carpeta.
-    if (d.sesion === 'ultima') resume = (lista.find(s => s.propia && !s.enTerminal) ?? (a.nombre === DIR ? lista.find(s => !s.enTerminal) : undefined))?.id;
+    // «Llamar»: la sesión fijada (adoptada) si existe y no está en una terminal; si no, la última suya (el director: la última de la carpeta).
+    const fija = a.sesion ? lista.find(x => x.id === a.sesion && !x.enTerminal) : undefined;
+    if (d.sesion === 'ultima' && a.sesion && !fija) throw new Error(tx('err_sesion_carpeta'));
+    if (d.sesion === 'ultima') resume = fija?.id ?? (lista.find(s => s.propia && !s.enTerminal) ?? (a.nombre === DIR ? lista.find(s => !s.enTerminal) : undefined))?.id;
     else if (typeof d.sesion === 'string' && d.sesion !== 'nueva') {
       const s = UUID.test(d.sesion) && lista.find(x => x.id === d.sesion);
       if (!s) throw new Error(tx('err_sesion_carpeta'));
@@ -210,12 +250,13 @@ export function crear(o: Opciones = {}) {
     await s.cerrar();
     // Otra conversación = otro chat. "Aplicar modelo" (mantener) y el relanzado automático con chat ya visible lo conservan.
     if (d.mantener !== true && (d.sesion !== 'ultima' || !logs.get(a.nombre)?.length)) {
-      const msgs = resume && !o.demo ? await getSessionMessages(resume, { dir: a.carpeta }).catch(() => []) : [];
+      const msgs = resume && !o.demo && a.motor !== 'codex' ? await getSessionMessages(resume, { dir: a.carpeta }).catch(() => []) : [];
       const evs = msgs.filter(m => !m.parent_tool_use_id).slice(-60).flatMap(m => deMensaje(m.type, m.message, true));
       logs.set(a.nombre, evs.map(e => ({ ...e, viejo: true })));
       difundir({ t: 'log', agente: a.nombre, eventos: logs.get(a.nombre), permisos: [] });
     }
-    await s.lanzar({ resume, modelo, esfuerzo, plan: d.plan === true, contexto: contextoDe(a) });
+    const modo: Modo = MODOS.includes(d.modo as Modo) ? (d.modo as Modo) : d.plan === true ? 'plan' : modoDe(a);
+    await s.lanzar({ resume, modelo, esfuerzo, modo, contexto: contextoDe(a) });
   }
 
   // Lo que se añade al prompt: el contexto de su zona y después el suyo propio.
@@ -259,8 +300,12 @@ export function crear(o: Opciones = {}) {
 
   async function comando(ws: WebSocket, d: Record<string, unknown>) {
     if (d.t === 'general') return aDirector(ws, d);
+    if (d.t === 'adoptables' && !d.agente) return enviarA(ws, { t: 'adoptables', agente: '', ...(await adoptables(null, Number(d.desde) || 0)) });
     if (d.t === 'buzon') { // a un agente del roster o a una sesión viva en terminal; el director revisa y entrega
-      const to = typeof d.agente === 'string' ? d.agente : '', texto = typeof d.texto === 'string' ? d.texto.trim() : '';
+      let to = typeof d.agente === 'string' ? d.agente : '';
+      const texto = typeof d.texto === 'string' ? d.texto.trim() : '';
+      const ra = porNombre.get(to);
+      if (ra && to !== DIR) to = enTerminal(ra)?.nombre ?? to; // una sesión adoptada recibe a su nombre de terminal
       if (to === DIR || (!porNombre.has(to) && !terminal.some(x => x.nombre === to))) throw new Error(tx('err_buzon_dest'));
       if (!texto || texto.length > 1000) throw new Error(tx('err_buzon_largo'));
       if (!cupoEscritura()) throw new Error(tx('err_cupo'));
@@ -279,16 +324,36 @@ export function crear(o: Opciones = {}) {
         const texto = typeof d.texto === 'string' ? d.texto.slice(0, 50_000) : '';
         const adj = (Array.isArray(d.adjuntos) ? d.adjuntos : []).slice(0, 8).map(id => adjunto(a.nombre, id));
         if (!texto.trim() && !adj.length) throw new Error(tx('err_vacio'));
-        if (!s?.viva) await lanzar(a, { sesion: 'ultima', modelo: d.modelo, esfuerzo: d.esfuerzo, plan: d.plan });
+        if (!s?.viva) await lanzar(a, { sesion: 'ultima', modelo: d.modelo, esfuerzo: d.esfuerzo, modo: d.modo });
         return sesion(a).enviar(texto, adj);
       }
-      case 'permiso':
-        if (typeof d.id !== 'string' || !permisos.decidir(a.nombre, d.id, d.permitir === true, typeof d.mensaje === 'string' ? d.mensaje.slice(0, 2000) : '', respuestasValidas(d.respuestas)))
-          throw new Error(tx('err_permiso'));
+      case 'permiso': {
+        const siempre = d.siempre === 'sesion' || d.siempre === 'proyecto' ? d.siempre : undefined;
+        const anteriores = siempre === 'proyecto' ? reglasProyecto(a.carpeta) : [];
+        const r = typeof d.id === 'string' ? permisos.decidir(a.nombre, d.id, d.permitir === true, typeof d.mensaje === 'string' ? d.mensaje.slice(0, 2000) : '', respuestasValidas(d.respuestas), siempre) : false;
+        if (!r) throw new Error(tx('err_permiso'));
+        if (r.siempre === 'sesion' && s) s.reglasSesion = [...new Set([...s.reglasSesion, ...r.reglas])];
+        if (r.siempre === 'proyecto') { // se anota para poder listarla y quitarla después (solo las que agregó la web)
+          const dst = a.nombre === DIR ? crudo.director : crudo.agentes.find((x: any) => x?.nombre === a.nombre);
+          if (dst) { dst.reglasWeb = [...new Set([...(dst.reglasWeb ?? []), ...r.reglas.filter(x => !anteriores.includes(x))])]; recargar(); guardarAtomico(destino, crudo); }
+        }
+        if (r.siempre) cambio();
         return;
+      }
+      case 'modo': {
+        if (a.motor === 'codex' && !['default', 'plan'].includes(String(d.modo))) throw new Error(tx('err_modo'));
+        if (!MODOS.includes(d.modo as Modo)) throw new Error(tx('err_modo'));
+        const dst = a.nombre === DIR ? crudo.director : crudo.agentes.find((x: any) => x?.nombre === a.nombre);
+        if (s) await s.cambiarModo(d.modo as Modo);
+        if (dst) { dst.modoPermisos = d.modo; recargar(); guardarAtomico(destino, crudo); }
+        cambio();
+        return;
+      }
+      case 'quitarRegla': return quitarRegla(a, d);
+      case 'adoptables': return enviarA(ws, { t: 'adoptables', agente: a.nombre, ...(await adoptables(a, Number(d.desde) || 0)) });
       case 'detener': return s?.detener();
       case 'cerrar': return s?.cerrar();
-      case 'plan': return s?.modoPlan(d.plan === true);
+      case 'plan': return comando(ws, { t: 'modo', agente: a.nombre, modo: d.plan === true ? 'plan' : 'default' });
       default: throw new Error(tx('err_comando'));
     }
   }
@@ -321,6 +386,9 @@ export function crear(o: Opciones = {}) {
     });
   }
 
+  let colaEquipo = Promise.resolve();
+  const enCola = (fn: () => Promise<unknown>) => { colaEquipo = colaEquipo.then(async () => { await fn(); }).catch(e => console.error('equipo:', e.message)); };
+
   // POST /agentes {accion: crear|editar|quitar, ...}: cambia el equipo fijo en la config (nunca carpetas ni sesiones).
   // El director y los bucles de Codex no se tocan desde aquí. Crear no lanza al agente.
   function equipo(req: IncomingMessage, res: ServerResponse) {
@@ -328,7 +396,8 @@ export function crear(o: Opciones = {}) {
     let cuerpo = '';
     req.setEncoding('utf8');
     req.on('data', (x: string) => { cuerpo += x; if (cuerpo.length > 16384) req.destroy(); });
-    req.on('end', async () => {
+    req.on('end', () => enCola(async () => {
+      try {
       let d: any;
       try { d = JSON.parse(cuerpo); } catch { return responderTexto(res, 400, tx('http_json')); }
       const err = (code: number, k: string) => responderTexto(res, code, tx(k));
@@ -338,25 +407,64 @@ export function crear(o: Opciones = {}) {
       const puesto = d.puesto === undefined ? undefined : d.puesto;
       if (puesto !== undefined && !(Number.isInteger(puesto?.zona) && Number.isInteger(puesto?.i) && puesto.zona >= 0 && puesto.zona < config.oficina.zonas.length && puesto.i >= 0 && puesto.i <= MAX_PUESTO)) return err(400, 'err_puesto');
       if (puesto && !puestoLibre(config, puesto, d.accion === 'editar' ? nombre : undefined)) return err(409, 'err_puesto_ocupado');
-      if (d.modelo !== undefined && !MODELOS.includes(d.modelo)) return err(400, 'err_modelo');
+      if (d.modoPermisos !== undefined && !MODOS.includes(d.modoPermisos)) return err(400, 'err_modo');
+      const motor = d.motor ?? (k >= 0 ? crudo.agentes[k].motor : undefined) ?? 'claude';
+      if (!['claude', 'codex'].includes(motor) || (k >= 0 && motor !== (crudo.agentes[k].motor ?? 'claude'))) return err(400, 'err_modelo');
+      if (d.modelo !== undefined && !(motor === 'codex' ? typeof d.modelo === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(d.modelo) : MODELOS.includes(d.modelo))) return err(400, 'err_modelo');
       if (d.descripcion !== undefined && (typeof d.descripcion !== 'string' || d.descripcion.length > 200)) return err(400, 'err_desc');
       if (d.color !== undefined && !(typeof d.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(d.color))) return err(400, 'err_color');
       if (d.contexto !== undefined && (typeof d.contexto !== 'string' || d.contexto.length > MAX_CONTEXTO)) return err(400, 'err_contexto');
-      if (d.accion === 'crear') {
+      let papel: string | undefined;
+      if (d.accion === 'deshacer') { // devuelve la entrada quitada o soltada hace menos de 15 s
+        const p = typeof d.id === 'string' ? papelera.get(d.id) : undefined;
+        if (!p || Date.now() > p.vence) return err(404, 'err_deshacer');
+
+        const j = crudo.agentes.findIndex((a: any) => a?.nombre === p.entrada.nombre);
+        if (p.tipo === 'soltar') { if (j < 0) return err(404, 'err_agente_no'); if (p.entrada.sesion && roster.some(a => a.nombre !== p.entrada.nombre && a.sesion === p.entrada.sesion)) return err(409, 'err_sesion_ya'); crudo.agentes[j].sesion = p.entrada.sesion; }
+        else {
+          if (j >= 0) return err(409, 'err_nombre_ya');
+          if (p.entrada.sesion && roster.some(a => a.sesion === p.entrada.sesion)) return err(409, 'err_sesion_ya');
+          if (p.entrada.puesto && !puestoLibre(config, p.entrada.puesto)) delete p.entrada.puesto; // su escritorio se ocupó: se le da otro
+          crudo.agentes.splice(Math.min(p.indice, crudo.agentes.length), 0, p.entrada);
+        }
+      } else if (d.accion === 'adoptar') { // una sesión existente (viva o pasada) pasa a ser un agente del equipo
+        if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(nombre)) return err(400, 'err_nombre');
+        if (k >= 0) return err(409, 'err_nombre_ya');
+        if (typeof d.sesion !== 'string' || !UUID_RE.test(d.sesion)) return err(400, 'err_sesion_no');
+        if (dirRe?.test(nombre) || sesiones.get(DIR)?.sessionId === d.sesion) return err(400, 'err_no_dir_ui');
+        if (roster.some(a => a.sesion === d.sesion)) return err(409, 'err_sesion_ya');
+        const ses = await buscarSesion(d.sesion, undefined, motor);
+        if (!ses) return err(404, 'err_sesion_no');
+        if (dirRe?.test(ses.nombre ?? '') || roster.some(a => a.nombre === ses.nombre)) return err(400, 'err_no_dir_ui');
+        const c = validarCarpeta(ses.cwd, home);
+        if ('error' in c) return err(400, c.error);
+        if (!puesto) return err(400, 'err_puesto');
+        crudo.agentes.push({ nombre, ...(motor === 'codex' ? { motor } : {}), carpeta: c.ruta, sesion: d.sesion, color: d.color ?? '#a98bff', modelo: d.modelo ?? (motor === 'codex' ? 'default' : 'sonnet'), descripcion: (d.descripcion ?? '').trim(), puesto, ...(d.contexto?.trim() ? { contexto: d.contexto.trim() } : {}) });
+      } else if (d.accion === 'crear') {
         if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(nombre)) return err(400, 'err_nombre');
         if (k >= 0) return err(409, 'err_nombre_ya');
         const c = validarCarpeta(d.carpeta, home);
         if ('error' in c) return err(400, c.error);
         if (!puesto) return err(400, 'err_puesto');
-        crudo.agentes.push({ nombre, carpeta: c.ruta, color: d.color ?? '#a98bff', modelo: d.modelo ?? 'sonnet', descripcion: (d.descripcion ?? '').trim(), puesto, ...(d.contexto?.trim() ? { contexto: d.contexto.trim() } : {}) });
+        crudo.agentes.push({ nombre, ...(motor === 'codex' ? { motor } : {}), carpeta: c.ruta, color: d.color ?? '#a98bff', modelo: d.modelo ?? (motor === 'codex' ? 'default' : 'sonnet'), descripcion: (d.descripcion ?? '').trim(), puesto, ...(d.contexto?.trim() ? { contexto: d.contexto.trim() } : {}) });
       } else if (d.accion === 'editar' || d.accion === 'quitar') {
         if (k < 0) return err(404, 'err_agente_no');
         if (d.accion === 'quitar') {
+          // Solo sale de la config: nunca se borra su carpeta, su conversación ni se cierra una sesión de terminal.
           await sesiones.get(nombre)?.cerrar();
           sesiones.delete(nombre); logs.delete(nombre); permisos.cancelarDe(nombre, tx('perm_sesion_cerrada'));
+          papel = alPapelero('quitar', crudo.agentes[k], k);
           crudo.agentes.splice(k, 1);
         } else {
           const a = crudo.agentes[k];
+          if (d.sesion === null) { papel = alPapelero('soltar', a, k); delete a.sesion; } // «Solo soltar la sesión»
+          else if (d.sesion !== undefined) { // «Cambiar sesión»: otra de SU carpeta
+            const ses = typeof d.sesion === 'string' && UUID_RE.test(d.sesion) ? await buscarSesion(d.sesion, a.carpeta, a.motor ?? 'claude') : null;
+            if (!ses) return err(404, 'err_sesion_no');
+            if (dirRe?.test(ses.nombre ?? '') || sesiones.get(DIR)?.sessionId === d.sesion) return err(400, 'err_no_dir_ui');
+            if (roster.some(x => x.nombre !== nombre && x.sesion === d.sesion)) return err(409, 'err_sesion_ya');
+            a.sesion = d.sesion;
+          }
           if (d.descripcion !== undefined) a.descripcion = d.descripcion.trim();
           if (d.color !== undefined) a.color = d.color;
           if (d.modelo !== undefined) a.modelo = d.modelo;
@@ -364,12 +472,102 @@ export function crear(o: Opciones = {}) {
           if (d.contexto !== undefined) { if (d.contexto.trim()) a.contexto = d.contexto.trim(); else delete a.contexto; }
         }
       } else return err(400, 'err_comando');
-      try { recargar(); } catch (e) { crudo = JSON.parse(antes); return responderTexto(res, 400, (e as Error).message); }
+      try { recargar(); } catch (e) { crudo = JSON.parse(antes); if (papel) papelera.delete(papel); return responderTexto(res, 400, (e as Error).message); }
       guardarAtomico(destino, crudo);
-      cambio();
-      res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}');
-    });
+      if (d.accion === 'deshacer') papelera.delete(d.id);
+      refrescarOficina(); revisarOficina(); cambio();
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, ...(papel ? { deshacer: papel } : {}) }));
+      } catch (e) { responderTexto(res, 400, String((e as Error).message)); }
+    }));
   }
+
+  // Papelera de ~15 s para «Deshacer» al quitar un agente o soltar su sesión (guarda la entrada tal cual estaba).
+  const papelera = new Map<string, { tipo: 'quitar' | 'soltar'; entrada: any; indice: number; vence: number }>();
+  function alPapelero(tipo: 'quitar' | 'soltar', entrada: any, indice: number) {
+    const id = randomBytes(6).toString('hex'), ahora = Date.now();
+    for (const [i, p] of papelera) if (ahora > p.vence) papelera.delete(i);
+    papelera.set(id, { tipo, entrada: JSON.parse(JSON.stringify(entrada)), indice, vence: ahora + 15_000 });
+    return id;
+  }
+
+  // Busca una sesión por id: viva en una terminal o en el historial de Claude Code (solo metadatos). `carpeta` la restringe.
+  async function buscarSesion(id: string, carpeta?: string, motor = 'claude'): Promise<{ cwd: string; nombre?: string } | null> {
+    const t = terminal.find(x => x.sessionId === id && x.motor === motor);
+    if (t) return !carpeta || t.cwd === carpeta ? { cwd: t.cwd, nombre: t.nombre } : null;
+    let l: any[] = [];
+    try { l = motor === 'codex' ? listarCX() : carpeta ? await listar(carpeta) : await listarTodas(); } catch { /* sin historial */ }
+    const x = l.find(y => y.sessionId === id);
+    const cwd = x?.cwd ?? carpeta;
+    return x && cwd && (!carpeta || cwd === carpeta) ? { cwd, nombre: x.customTitle } : null;
+  }
+
+  // Lo que se puede poner en un escritorio: sesiones vivas fuera del equipo y sesiones pasadas (sin el director ni las ya fijadas).
+  // Con agente: solo las de su carpeta («Cambiar sesión»).
+  async function adoptables(a: Agente | null, desde: number) {
+    const fijas = new Set([...roster.map(x => x.sesion), ...[...sesiones.values()].filter(x => x.viva).map(x => x.sessionId)].filter(Boolean));
+    const ok = (cwd: string) => (a ? cwd === a.carpeta : !('error' in validarCarpeta(cwd, home)));
+    const vivas = terminal.filter(t => (!a || t.motor === (a.motor ?? 'claude')) && !dirRe?.test(t.nombre) && !porNombre.has(t.nombre) && !fijas.has(t.sessionId) && (!a || t.cwd === a.carpeta))
+      .map(t => ({ sesion: t.sessionId, motor: t.motor, nombre: t.nombre, cwd: t.cwd, estado: t.estado, inicio: t.inicio, valida: ok(t.cwd) }));
+    const vivasIds = new Set(terminal.map(t => t.sessionId));
+    let todas: any[] = [];
+    try { todas = a?.motor === 'codex' ? listarCX().filter(x => x.cwd === a.carpeta).map(x => ({ ...x, motor: 'codex', summary: x.pedido })) : (await (a ? listar(a.carpeta) : listarTodas())).map(x => ({ ...x, motor: 'claude' }));
+      if (!a) todas.push(...listarCX().map(x => ({ ...x, motor: 'codex', summary: x.pedido }))); } catch { /* sin historial */ }
+    const pasadas = todas.filter(x => !vivasIds.has(x.sessionId) && !fijas.has(x.sessionId) && !(dirRe && dirRe.test(x.customTitle ?? '')) && (!a || !x.cwd || x.cwd === a.carpeta))
+      .sort((x, y) => y.lastModified - x.lastModified).slice(desde, desde + 30)
+      .map(x => ({ sesion: x.sessionId, motor: x.motor, modelo: x.modelo, titulo: tapar(x.customTitle || x.summary || x.firstPrompt || '—', 120), cwd: x.cwd ?? a?.carpeta ?? '', fecha: x.lastModified, valida: ok(x.cwd ?? a?.carpeta ?? '') }));
+    return { vivas, pasadas, desde };
+  }
+
+  // Quita una regla agregada desde la web. Proyecto: se borra de .claude/settings.local.json de su carpeta (solo esa
+  // línea, y solo si la agregó la web). Sesión: vive en el proceso; se quita reiniciando la sesión (retomándola).
+  async function quitarRegla(a: Agente, d: Record<string, unknown>) {
+    const regla = typeof d.regla === 'string' ? d.regla : '';
+    if (d.destino === 'sesion') {
+      const s = sesiones.get(a.nombre);
+      if (!s?.viva || !s.reglasSesion.includes(regla)) throw new Error(tx('err_regla_no'));
+      await s.lanzar({ resume: s.sessionId, modelo: s.modelo, esfuerzo: s.esfuerzo, modo: s.modo, contexto: contextoDe(a) });
+      return cambio();
+    }
+    const lista = (a.nombre === DIR ? director?.reglasWeb : a.reglasWeb) ?? [];
+    if (!lista.includes(regla)) throw new Error(tx('err_regla_no'));
+    const f = rutaReglas(a.carpeta);
+    if (sesiones.get(a.nombre)?.viva) throw new Error('Cierra la sesión web antes de quitar una regla de proyecto');
+    try {
+      const j = JSON.parse(readFileSync(f, 'utf8')), allow = j?.permissions?.allow;
+      if (Array.isArray(allow) && allow.includes(regla)) {
+        j.permissions.allow = allow.filter((x: unknown) => x !== regla);
+        guardarAtomico(f, j);
+      }
+    } catch (e) { if (existsSync(f)) throw e; }
+    const dst = a.nombre === DIR ? crudo.director : crudo.agentes.find((x: any) => x?.nombre === a.nombre);
+    dst.reglasWeb = (dst.reglasWeb ?? []).filter((x: string) => x !== regla);
+    recargar(); guardarAtomico(destino, crudo); cambio();
+  }
+
+  // ---- Uso del plan de Claude (ventana de 5 h y semanal) ----
+  // Fuente real: la misma consulta que usa /usage (API experimental del SDK, sin turno del modelo ni tokens), cada 5 min;
+  // entre consultas, los rate_limit_event de las sesiones abiertas. Si nada responde, queda el último dato con su hora.
+  let cupoClaude: any = (() => { try { return JSON.parse(readFileSync(join(tmp, 'cupo-claude.json'), 'utf8')); } catch { return null; } })();
+  function anotarCupo(c: Record<string, unknown>) {
+    cupoClaude = { ...(cupoClaude ?? {}), ...c, visto: Math.floor(Date.now() / 1000) };
+    try { writeFileSync(join(tmp, 'cupo-claude.json'), JSON.stringify(cupoClaude)); } catch { /* sin disco */ }
+    revisarOficina();
+  }
+  function cupoDeEvento(i: unknown) { const dato = parsearCupoEvento(i); if (dato) anotarCupo(dato); }
+  async function consultarCupo() {
+    let suelta: () => void = () => {};
+    const nunca = { async *[Symbol.asyncIterator]() { await new Promise<void>(r => (suelta = r)); } };
+    const ac = new AbortController(), tope = setTimeout(() => ac.abort(), 30_000);
+    try {
+      const q: any = sdkQuery({ prompt: nunca as any, options: { cwd: tmp, model: 'haiku', permissionMode: 'default', abortController: ac, canUseTool: async () => ({ behavior: 'deny', message: 'no' }) } });
+      const u = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true });
+      const dato = cupoDeUsage(u); if (dato) anotarCupo(dato);
+    } catch { /* la API experimental puede cambiar: queda el último dato o los eventos */ }
+    finally { clearTimeout(tope); suelta(); ac.abort(); }
+  }
+  const usarCupo = o.cupoClaude ?? (!o.query && !o.demo);
+  const relojCupo = usarCupo ? setInterval(consultarCupo, 5 * 60_000) : null;
+  const inicioCupo = usarCupo ? setTimeout(consultarCupo, 2000) : null;
 
   // POST /zonas {accion: crear|editar|quitar, indice, nombre, color, patron, contexto}: las zonas de la oficina.
   // Quitar solo si nadie del equipo tiene escritorio ahí; los índices de las zonas siguientes se corren.
@@ -477,7 +675,7 @@ export function crear(o: Opciones = {}) {
   };
   // Lo que la página necesita saber de la configuración (sin rutas de agentes).
   const publico = () => JSON.stringify({
-    titulo: config.titulo, idioma: config.idioma, demo: !!o.demo, oficina: config.oficina, paleta: PALETA,
+    titulo: config.titulo, idioma: config.idioma, demo: !!o.demo, oficina: config.oficina, paleta: PALETA, modos: MODOS,
     director: director ? { nombre: director.nombre, color: director.color } : null,
   }).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
@@ -530,6 +728,8 @@ export function crear(o: Opciones = {}) {
     escuchar: () => new Promise<void>(r => server.listen(puerto, '127.0.0.1', r)),
     async cerrar() {
       clearInterval(vigia);
+      if (inicioCupo) clearTimeout(inicioCupo);
+      if (relojCupo) clearInterval(relojCupo);
       await Promise.all([...sesiones.values()].map(s => s.cerrar()));
       for (const ws of clientes) ws.terminate();
       await new Promise(r => server.close(r));

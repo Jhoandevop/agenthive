@@ -5,6 +5,7 @@ import { readFileSync, readdirSync, existsSync, statSync, openSync, readSync, cl
 import { join, basename, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Bucle } from './config.ts';
+import { descendienteDe } from './agentes.ts';
 
 const RE_TAPAR: [RegExp, string][] = [
   // \w de Python es Unicode; en JS no: se usan clases Unicode para tapar igual (josé@x.com).
@@ -149,7 +150,7 @@ export class Estado {
         const hechas = ns.length ? Math.max(...ns) : 0;
         vuelta = this.en ? (corre ? `round ${hechas + 1}` : `${hechas} rounds`) : corre ? `vuelta ${hechas + 1}` : `${hechas} vueltas`;
       }
-      if (corre || hecho) out.push({ id: b.script, tipo: 'codex', nombre: b.nombre, estado: hecho ? 'terminado' : 'busy', detalle: this.en ? 'Codex loop' : 'bucle de Codex', vuelta, directora: false });
+      if (corre || hecho) out.push({ id: b.script, tipo: 'codex', bucle: true, nombre: b.nombre, estado: hecho ? 'terminado' : 'busy', detalle: this.en ? 'Codex loop' : 'bucle de Codex', vuelta, directora: false });
     }
     return out;
   }
@@ -163,10 +164,12 @@ export class Estado {
     try { xs = readdirSync(dirSes).filter(f => /^\d+\.json$/.test(f)); } catch { /* sin sesiones */ }
     for (const f of xs) {
       try {
+        if (statSync(join(dirSes, f)).size > 64 * 1024) continue;
         const d = JSON.parse(readFileSync(join(dirSes, f), 'utf8')), pid = Number(d.pid);
         if (!Number.isInteger(pid) || !vivo(pid)) continue;
         const n = d.name || 'sin-nombre';
-        const a: any = { id: `claude-${pid}`, tipo: 'claude', nombre: n, estado: d.status || 'idle', detalle: basename(String(d.cwd || '').replace(/[\\/]+$/, '')), updatedAt: d.updatedAt, desde: Number(d.statusUpdatedAt || d.updatedAt || 0), directora: this.esDirector(n) };
+        // sesionId y propio (hijo de este proceso: una sesión lanzada desde la web) dejan al servidor unirla a su escritorio.
+        const a: any = { id: `claude-${pid}`, tipo: 'claude', nombre: n, sesionId: String(d.sessionId || ''), pid, propio: descendienteDe(pid), cwd: String(d.cwd || ''), estado: d.status || 'idle', detalle: basename(String(d.cwd || '').replace(/[\\/]+$/, '')), updatedAt: d.updatedAt, desde: Number(d.statusUpdatedAt || d.updatedAt || 0), directora: this.esDirector(n) };
         ag.push(a);
         try {
           const [p, r] = this.leerSesion(String(d.sessionId), n);

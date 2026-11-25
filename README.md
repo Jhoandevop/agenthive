@@ -123,7 +123,9 @@ Instructions are inside each file.
   - No CORS. Strict CSP: only first-party scripts, no inline scripts.
 - **Agents.**
   - Always `permissionMode: "default"` plus `canUseTool`, so anything your rules don't allow waits for your click.
-  - The app never uses `bypassPermissions`, `acceptEdits` or auto-approval.
+  - The permission mode is chosen per agent from the modes the SDK offers (`default`, `acceptEdits`, `plan`, `auto` if present). `bypassPermissions` and `dontAsk` are refused everywhere (config, API, WebSocket). «Always allow» rules (session or project) are shown exactly before confirming, only the ones added from the web can be listed and removed, and your global Claude settings are never written.
+  - **Codex agents** (`motor: "codex"`) run `codex exec --json` in their own folder with `--sandbox workspace-write` (or `read-only` in plan mode) and `--ask-for-approval never`. `danger-full-access` and the bypass flags are rejected in code. Limitation: `codex exec` has no interactive approvals, so the sandbox denies what would need one. Not yet verified against a real launch from the web.
+  - Ants = Codex processes and rollouts detected from `/proc` and `~/.codex/sessions` (never `auth.json`); bees = Claude Code.
   - Only roster agents (and the configured director) can be launched, and only in their own folder.
   - Creating an agent from the web (`POST /agentes`, same token, Origin and Host checks) requires an existing folder inside your home folder: not the home folder itself, nothing outside it after resolving symlinks, and no hidden segment such as `.ssh`, `.config`, `.claude`, `.codex`, `.gnupg` or `.local/share/keyrings`. The director and Codex loops can't be created or removed from the web.
   - Sessions live in a terminal are never resumed or attached to.

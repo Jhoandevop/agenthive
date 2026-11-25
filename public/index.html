@@ -17,7 +17,7 @@
  </div>
 </header>
 <div id="pared">
- <div id="cupo"><canvas id="bat" width="20" height="9"></canvas><div id="cx"></div><div id="cs"></div><div id="cc" data-t="claude_sin"></div></div>
+ <div id="cupo"><canvas id="bat" width="20" height="9"></canvas><div id="cx"></div><div id="cs"></div><canvas id="bat2" width="20" height="9"></canvas><div id="ccx" data-t="claude_sin"></div><div id="ccs"></div></div>
  <div id="pend" hidden><h3 id="pend-t"></h3><div id="pend-l"></div><details id="pend-h"><summary data-t="respondidas"></summary><ul></ul></details></div>
  <div id="pizarra"><div class="nota"></div><h3 data-t="pizarra"></h3><div id="feed"></div></div>
 </div>
@@ -39,7 +39,7 @@
   <span class="chip-e" id="c-estado"></span>
   <button type="button" id="c-x" class="b-sec" data-t="cerrar" data-tt="cerrar_tt"></button>
  </div>
- <div id="c-equipo" hidden><button type="button" id="b-editar" class="b-sec" data-t="editar"></button><button type="button" id="b-quitar" class="b-sec" data-t="quitar_equipo"></button></div>
+ <div id="c-equipo" hidden><button type="button" id="b-editar" class="b-sec" data-t="editar"></button><button type="button" id="b-cambiar" class="b-sec" data-t="cambiar_sesion"></button><button type="button" id="b-quitar-puesto" class="b-sec" data-t="quitar_puesto"></button><button type="button" id="b-quitar" class="b-sec" data-t="quitar_equipo"></button></div>
  <details id="c-ctx" hidden><summary id="c-ctx-t"></summary><div id="c-ctx-c"></div></details>
  <div id="c-llamar" hidden>
   <p data-t="no_esta"></p>
@@ -49,16 +49,19 @@
  <div class="barra" id="c-barra">
   <label><span data-t="modelo"></span> <select id="c-modelo"><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
   <label><span data-t="esfuerzo"></span> <select id="c-esfuerzo"><option value="" data-t="esf_def"></option><option value="low" data-t="esf_low"></option><option value="medium" data-t="esf_medium"></option><option value="high" data-t="esf_high"></option><option value="xhigh" data-t="esf_xhigh"></option><option value="max" data-t="esf_max"></option></select></label>
-  <label class="chk"><input type="checkbox" id="c-plan"> <span data-t="modo_plan"></span></label>
+  <label><span data-t="permisos_modo"></span> <select id="c-modo"></select></label>
   <span class="sep"></span>
   <button type="button" id="b-res" class="b-sec"></button>
+  <button type="button" id="b-reglas" class="b-sec" data-t="reglas_btn"></button>
   <button type="button" id="b-nueva" class="b-sec" data-t="sesion_nueva"></button>
   <button type="button" id="b-aplicar" class="b-sec" data-t="aplicar_modelo" data-tt="aplicar_tt"></button>
   <button type="button" id="b-hist" class="b-sec" data-t="historial"></button>
   <button type="button" id="b-detener" class="b-alerta" data-t="detener"></button>
   <button type="button" id="b-cerrar" class="b-sec" data-t="despedir" data-tt="despedir_tt"></button>
  </div>
+ <div id="c-modo-ayuda"></div>
  <div id="c-hist" hidden></div>
+ <div id="c-reglas" hidden></div>
  <div id="c-res" hidden></div>
  <dl id="c-info" hidden></dl>
  <div id="c-msgs" aria-live="polite"></div>
@@ -91,7 +94,8 @@
  <label><span data-t="f_desc"></span><textarea id="af-desc" maxlength="200" rows="2"></textarea></label>
  <label><span data-t="f_contexto"></span><textarea id="af-ctx" maxlength="2000" rows="3"></textarea><small data-t="f_contexto_ayuda"></small></label>
  <div class="fila">
-  <label><span data-t="f_modelo"></span><select id="af-modelo"><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
+  <label><span data-t="motor"></span><select id="af-motor"><option value="claude">Claude Code</option><option value="codex">Codex</option></select></label>
+  <label><span data-t="f_modelo"></span><input id="af-modelo-codex" maxlength="80" placeholder="default" hidden><select id="af-modelo"><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select></label>
   <label><span data-t="f_color"></span><input type="color" id="af-color" value="#7aa2f7"></label>
   <label><span data-t="f_zona"></span><select id="af-zona"></select></label>
   <label><span data-t="f_puesto"></span><input type="number" id="af-puesto" min="0" max="63" required></label>
@@ -99,6 +103,11 @@
  <p id="af-error" role="alert"></p>
  <div class="fila fin"><button type="button" id="af-cancelar" class="b-sec" data-t="f_cancelar"></button><button type="submit" data-t="f_guardar"></button></div>
 </form></dialog>
+<dialog id="puesto-dlg" class="menu-dlg"><h3 data-t="puesto_menu"></h3><button type="button" id="pm-crear" data-t="crear_aqui"></button><button type="button" id="pm-adoptar" data-t="poner_sesion"></button><button type="button" id="pm-cerrar" class="b-sec" data-t="cancelar"></button></dialog>
+<dialog id="adoptar-dlg" class="menu-dlg"><h3 data-t="adoptar_titulo"></h3><div id="ad-lista"></div><div class="fila fin"><button type="button" id="ad-mas" class="b-sec" data-t="ver_mas"></button><button type="button" id="ad-cerrar" class="b-sec" data-t="cancelar"></button></div></dialog>
+<dialog id="quitar-dlg" class="menu-dlg"><h3 data-t="quitar_puesto"></h3><p id="qd-texto"></p><div class="fila fin"><button type="button" id="qd-equipo" class="b-alerta" data-t="quitar_equipo_corto"></button><button type="button" id="qd-soltar" data-t="soltar_sesion"></button><button type="button" id="qd-cancelar" class="b-sec" data-t="cancelar"></button></div></dialog>
+<div id="soltar" data-t="soltar_aqui"></div>
+<div id="toast-deshacer" hidden><span id="td-texto"></span> <button type="button" id="td-boton" data-t="deshacer"></button></div>
 <dialog id="zona-dlg"><form id="zona-form">
  <h3 id="zf-titulo"></h3>
  <label><span data-t="z_nombre"></span><input id="zf-nombre" required maxlength="20" autocomplete="off"></label>

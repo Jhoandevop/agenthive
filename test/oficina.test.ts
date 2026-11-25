@@ -93,6 +93,7 @@ const listar = async (dir: string) => dir === carpetaDir
   ? [{ sessionId: SID_DIR_VIEJA, customTitle: 'lead-77', summary: 'a', lastModified: 2 }, { sessionId: SID_DIR_NUEVA, customTitle: 'otra cosa', summary: 'b', lastModified: 3 }]
   : [];
 const app = crear({ rutaConfig: cfgPath, home: casa, puerto: P, query: falso, esperaPermisoMs: 1500, dirSesiones, dirSubidas: subidas, dirParaDirector: paraDir, listar, generador: () => ({ agentes: [], feed: [], generado: 1 }) });
+const backupArranque = JSON.parse(readFileSync(cfgPath + '.bak', 'utf8'));
 before(() => app.escuchar());
 after(() => app.cerrar());
 const lineas = (f: string) => readFileSync(f, 'utf8').trim().split('\n').flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
@@ -373,7 +374,7 @@ test('config: sin oficina.config.json usa el ejemplo; la inválida da error clar
   assert.equal(c.agentes[0].carpeta, join(homedir(), 'proyectos', 'mi-app')); // "~/" se expande
   assert.equal(c.coordinacion.dir, join(raiz, 'tmp', 'coordinacion'));
   assert.equal(c.oficina.zonas.length, 3);
-  writeFileSync(join(raiz, 'oficina.config.json'), '{ "agentes": [] }');
+  writeFileSync(join(raiz, 'oficina.config.json'), '{ "agentes": null }');
   assert.throws(() => cargarConfig(raiz), /oficina\.config\.json: "agentes"/);
   assert.throws(() => validar({ agentes: [{ nombre: 'Malo Nombre', carpeta: '/x' }] }), /nombre inválido/);
   assert.throws(() => validar({ agentes: [{ nombre: 'a', carpeta: '/x' }], director: { nombre: 'G' } }), /patronSesion/);
@@ -433,7 +434,7 @@ const leerCfg = () => JSON.parse(readFileSync(cfgPath, 'utf8'));
 test('puestos: el arranque fija el puesto adivinado en la config (con .bak) y sobrevive a otro arranque con otro orden', async () => {
   const c = leerCfg();
   assert.deepEqual(c.agentes.map((a: any) => [a.nombre, a.puesto]), [['prueba', { zona: 0, i: 0 }], ['ocupado', { zona: 0, i: 1 }]]);
-  assert.deepEqual(JSON.parse(readFileSync(cfgPath + '.bak', 'utf8')), crudoInicial);
+  assert.deepEqual(backupArranque, crudoInicial);
   // "recarga": otra instancia con los agentes en orden inverso conserva cada puesto
   const otra = join(base, 'otra.config.json');
   writeFileSync(otra, JSON.stringify({ ...c, agentes: [...c.agentes].reverse() }));
